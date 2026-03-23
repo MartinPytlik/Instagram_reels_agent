@@ -20,7 +20,7 @@ _UUID_RE = re.compile(
 )
 
 from config import WATCH_TIME_AD_OR_OVERLAY
-from db_cache import sync_db_once
+from db_cache import sync_db_once, refresh_db_cache
 from device_manager import connect_device
 from instagram import (
     detect_ad_and_overlay,
@@ -72,6 +72,9 @@ def watch_and_interact(
             break
 
         reel_index += 1
+
+        if reel_index % 5 == 0:
+            refresh_db_cache(serial_number)
         counter = f"{reel_index}/{num_reels}" if not infinite else str(reel_index)
         print(f"{prefix}[{counter}] Reel")
 

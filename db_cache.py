@@ -80,6 +80,7 @@ def get_media_id_from_db(username: str = None, serial_number: str = None) -> dic
             for media in media_list:
                 if media.get("username", "").lower() == username.lower():
                     return media
+            return None  # Username zadán, ale nenalezen – nevracet náhodný starý záznam
 
         return max(media_list, key=lambda x: x.get("stored_time", 0), default=None)
 
