@@ -73,8 +73,7 @@ def watch_and_interact(
 
         reel_index += 1
 
-        if reel_index % 5 == 0:
-            refresh_db_cache(serial_number)
+        refresh_db_cache(serial_number)
         counter = f"{reel_index}/{num_reels}" if not infinite else str(reel_index)
         print(f"{prefix}[{counter}] Reel")
 
