@@ -39,6 +39,30 @@ from predictor import execute_actions, get_predicted_actions
 # Hlavní smyčka
 # ---------------------------------------------------------------------------
 
+def _bg_mem_scanner(
+    serial_number: str | None,
+    mem_cache: list[dict],
+    lock: threading.Lock,
+    stop_event: threading.Event,
+    interval_s: int = 20,
+) -> None:
+    """
+    Průběžně skenuje paměť procesu Instagramu a doplňuje sdílenou mem_cache.
+    Běží v daemon vlákně po celou dobu watch_and_interact.
+    """
+    stop_event.wait(interval_s)  # první scan po interval_s sekundách
+    while not stop_event.is_set():
+        fresh = sync_proc_mem(serial_number, timeout_s=12, exhaustive=True)
+        if fresh:
+            with lock:
+                known = {e["code"] for e in mem_cache}
+                for entry in fresh:
+                    if entry["code"] not in known:
+                        mem_cache.append(entry)
+                        known.add(entry["code"])
+        stop_event.wait(interval_s)
+
+
 def watch_and_interact(
     device,
     num_reels: int = 0,
@@ -75,8 +99,18 @@ def watch_and_interact(
 
     # Lokální cache shortcodů z paměti (počáteční scan + průběžné rescany)
     _mem_cache: list[dict] = list(mem_cache or [])
-    # Čas posledního live scan paměti (cooldown 60s – nová dávka přijde až kolem reelu 50+)
+    _mem_lock = threading.Lock()
+    # Čas posledního inline scan paměti (fallback cooldown 15s)
     _last_mem_scan_t: float = time.monotonic()
+
+    # Spusť background vlákno pro průběžný scan paměti (každých 20s)
+    _bg_stop = threading.Event()
+    _bg_thread = threading.Thread(
+        target=_bg_mem_scanner,
+        args=(serial_number, _mem_cache, _mem_lock, _bg_stop, 20),
+        daemon=True,
+    )
+    _bg_thread.start()
 
     while True:
         if not infinite and reel_index >= num_reels:
@@ -134,23 +168,26 @@ def watch_and_interact(
 
             if not video_id:
                 # Shortcode chybí – zkus zásobu z paměti.
-                # OkHttp buffer je čerstvý jen ~2 min po API dotazu; live scan tedy
-                # spouštíme max jednou za 60s (aby nezpomaloval mezi dávkami).
-                mem_entries = [e for e in _mem_cache if e["code"] not in _sent_ids]
-                if not mem_entries and time.monotonic() - _last_mem_scan_t > 60:
-                    print(f"{prefix}  Shortcode nenalezen – scanuju paměť procesu (~4s)...")
-                    fresh = sync_proc_mem(serial_number, timeout_s=8)
+                # Background vlákno průběžně doplňuje _mem_cache; inline scan
+                # slouží jako záloha s cooldownem 15s.
+                with _mem_lock:
+                    mem_entries = [e for e in _mem_cache if e["code"] not in _sent_ids]
+                if not mem_entries and time.monotonic() - _last_mem_scan_t > 15:
+                    print(f"{prefix}  Shortcode nenalezen – scanuju paměť procesu (~8s)...")
+                    fresh = sync_proc_mem(serial_number, timeout_s=10, exhaustive=True)
                     _last_mem_scan_t = time.monotonic()
-                    known = {e["code"] for e in _mem_cache}
-                    for e in fresh:
-                        if e["code"] not in known:
-                            _mem_cache.append(e)
-                    mem_entries = [e for e in fresh if e["code"] not in _sent_ids]
+                    with _mem_lock:
+                        known = {e["code"] for e in _mem_cache}
+                        for e in fresh:
+                            if e["code"] not in known:
+                                _mem_cache.append(e)
+                        mem_entries = [e for e in fresh if e["code"] not in _sent_ids]
                 elif not mem_entries:
-                    secs_left = int(60 - (time.monotonic() - _last_mem_scan_t))
+                    secs_left = int(15 - (time.monotonic() - _last_mem_scan_t))
                     print(f"{prefix}  Shortcode nenalezen (paměť prázdná, cooldown ještě {secs_left}s)")
                 # Filtruj shortcody z paměti – přeskoč již použité (ochrana duplicit)
-                mem_entries = [e for e in mem_entries if e["code"] not in _sent_ids]
+                with _mem_lock:
+                    mem_entries = [e for e in mem_entries if e["code"] not in _sent_ids]
                 if mem_entries:
                     mem_entry = mem_entries[0]
                     video_id = mem_entry["code"]
@@ -187,6 +224,8 @@ def watch_and_interact(
         _print_reel_summary(prefix, reel_info)
         _scroll_if_not_last(device, reel_index, num_reels, infinite)
 
+    _bg_stop.set()
+    _bg_thread.join(timeout=2)
     print(f"{prefix}Hotovo – procházeno {reel_index} Reelů.")
     return all_reels
 
@@ -233,15 +272,24 @@ def run_bot_for_device(
 
     def _do_initial_mem_scan():
         time.sleep(5)  # Instagram potřebuje čas načíst feed a dokončit initial API dotaz
-        _initial_mem.extend(sync_proc_mem(serial_number, timeout_s=18, exhaustive=True))
+        results = sync_proc_mem(serial_number, timeout_s=18, exhaustive=True)
+        _initial_mem.extend(results)
+        # Pokud počáteční scan nenašel nic, zkusit znovu po 10s (feed se mohl načíst pozdě)
+        if not results:
+            time.sleep(10)
+            retry = sync_proc_mem(serial_number, timeout_s=12, exhaustive=True)
+            known = {e["code"] for e in _initial_mem}
+            for e in retry:
+                if e["code"] not in known:
+                    _initial_mem.append(e)
 
     _mem_thread = threading.Thread(target=_do_initial_mem_scan, daemon=True)
     _mem_thread.start()
 
     go_to_reels(device, device_name)
 
-    # Počkej na dokončení scanu (sleep 5s + scan 18s = max 25s)
-    _mem_thread.join(timeout=25)
+    # Počkej na dokončení scanu (sleep 5s + scan 18s + retry 22s = max 47s)
+    _mem_thread.join(timeout=47)
     print(f"[{device_name}] Počáteční scan paměti: nalezeno {len(_initial_mem)} shortcodů.")
     initial_mem = _initial_mem
 
