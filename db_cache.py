@@ -5,7 +5,12 @@ Synchronizace z telefonu probíhá pouze jednou za spuštění bota pro každé
 zařízení zvlášť. Databáze vyžaduje root přístup na zařízení.
 """
 
-from get_media_id import sync_instagram_db, get_cached_media_info
+from get_media_id import (
+    sync_instagram_db, get_cached_media_info,
+    sync_clips_db, get_clips_media_info,
+    sync_user_reel_medias_db, get_user_reel_medias_info,
+    sync_http_response_cache, get_http_cache_media_info,
+)
 
 
 # Slovník {cache_key: {"synced": bool, "media_list": list}}
@@ -40,7 +45,7 @@ def sync_db_once(serial_number: str = None, device_prefix: str = ""):
         print(f"{prefix}  Synchronizace DB selhala (zařízení pravděpodobně nemá root přístup).")
 
 
-def refresh_db_cache(serial_number: str = None):
+def refresh_db_cache(serial_number: str = None, device_prefix: str = ""):
     """
     Obnoví obsah cache databáze ze zařízení.
 
@@ -48,12 +53,61 @@ def refresh_db_cache(serial_number: str = None):
     """
     global _db_cache
 
+    prefix = f"[{device_prefix}] " if device_prefix else ""
     cache_key = serial_number or "default"
     db_path = sync_instagram_db(serial_number)
 
+    _db_cache.setdefault(cache_key, {"synced": False, "media_list": []})
+
+    combined: list = []
+
     if db_path:
-        _db_cache.setdefault(cache_key, {"synced": False, "media_list": []})
-        _db_cache[cache_key]["media_list"] = get_cached_media_info(db_path)
+        combined.extend(get_cached_media_info(db_path))
+
+    # Sekundární zdroj: clips.db (obsahuje videa, která flash_media nemá)
+    clips_path = sync_clips_db(serial_number)
+    if clips_path:
+        clips_entries = get_clips_media_info(clips_path)
+        existing_codes = {m.get("code") for m in combined if m.get("code")}
+        for entry in clips_entries:
+            if entry.get("code") not in existing_codes:
+                combined.append(entry)
+                existing_codes.add(entry["code"])
+
+    # Terciární zdroj: user_reel_medias_room_db (reely sledovaných uživatelů – přímý shortcode)
+    urm_path = sync_user_reel_medias_db(serial_number)
+    if urm_path:
+        urm_entries = get_user_reel_medias_info(urm_path)
+        existing_codes = {m.get("code") for m in combined if m.get("code")}
+        for entry in urm_entries:
+            if entry.get("code") not in existing_codes:
+                combined.append(entry)
+                existing_codes.add(entry["code"])
+
+    # Kvarterní zdroj: HTTP response cache – Instagram cachuje API odpovědi se všemi videi
+    http_dir = sync_http_response_cache(serial_number)
+    if http_dir:
+        http_entries = get_http_cache_media_info(http_dir)
+        existing_codes = {m.get("code") for m in combined if m.get("code")}
+        for entry in http_entries:
+            if entry.get("code") not in existing_codes:
+                combined.append(entry)
+                existing_codes.add(entry["code"])
+
+    if combined:
+        # Akumuluj – přidej jen záznamy, které v cache ještě nejsou
+        existing = _db_cache[cache_key]["media_list"]
+        existing_keys = {m.get("code") or m.get("full_id") for m in existing}
+        new_count = 0
+        for entry in combined:
+            key = entry.get("code") or entry.get("full_id")
+            if key and key not in existing_keys:
+                existing.append(entry)
+                existing_keys.add(key)
+                new_count += 1
+        if new_count > 0:
+            total = len(existing)
+            print(f"{prefix}  [DB] +{new_count} nových médií (celkem {total}).")
 
 
 def get_media_id_from_db(username: str = None, serial_number: str = None) -> dict | None:
@@ -77,9 +131,12 @@ def get_media_id_from_db(username: str = None, serial_number: str = None) -> dic
             return None
 
         if username:
-            for media in media_list:
-                if media.get("username", "").lower() == username.lower():
-                    return media
+            # Kolaborativní Reely mají username ve formátu "X and Y" – zkus každé zvlášť
+            candidates = [u.strip() for u in username.split(" and ")] if " and " in username else [username]
+            for candidate in candidates:
+                for media in media_list:
+                    if media.get("username", "").lower() == candidate.lower():
+                        return media
             return None  # Username zadán, ale nenalezen – nevracet náhodný starý záznam
 
         return max(media_list, key=lambda x: x.get("stored_time", 0), default=None)

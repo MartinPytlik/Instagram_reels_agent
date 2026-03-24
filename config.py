@@ -28,8 +28,8 @@ WATCH_TIME_AD_OR_OVERLAY = (0.5, 1.5)  # reklama / overlay – krátká pauza p�
 # ---------------------------------------------------------------------------
 
 DEVICES: list[dict] = [
-    {"serial": "R58Y90R811Y", "name": "Device1", "session_id": "fa8d3bde-9fe2-48ce-8911-976d4c77f1a6"},
-    {"serial": "R58Y90R6JWV", "name": "Device2", "session_id": "305f7081-da0e-48ca-8d44-81247da49b08"},
+    {"serial": "R58Y90R811Y", "name": "Device1", "session_id": "b4b98703-1625-4a3c-9882-a5f2ee91973f"},
+    {"serial": "R58Y90R6JWV", "name": "Device2", "session_id": "b4b98703-1625-4a3c-9882-a5f2ee91973f"},
 ]
 
 # ---------------------------------------------------------------------------

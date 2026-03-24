@@ -46,7 +46,7 @@ Android telefon (USB)
 
 1. Bot se připojí k telefonům přes USB a ADB.
 2. Otevře Instagram a přejde na sekci Reels.
-3. Pro každé video získá metadata z UI hierarchie (username, likes, komentáře) a doplní je z Instagram SQLite databáze na rootnutém telefonu (media_id, shortcode, délka videa, hashtagy).
+3. Pro každé video získá metadata z UI hierarchie (username, likes, komentáře) a doplní je z Instagram SQLite databáze na rootnutém telefonu (media_id, shortcode, délka videa, hashtagy). Pokud databáze shortcode neobsahuje, bot souběžně scanuje nativní paměť procesu Instagramu (OkHttp buffery), kde Instagram krátkodobě uchovává raw JSON odpovědi z API.
 4. Metadata odešle na prediktor API, které vrátí doporučené akce.
 5. Bot akce provede (like, uložení, sledování po danou dobu, přeskok).
 6. Vše zaznamenává do JSON souboru.
@@ -240,7 +240,17 @@ Hlavní logika bota:
 - Souhrn po dokončení
 
 ### `get_media_id.py`
-Synchronizace Instagram interní SQLite databáze z rootnutého telefonu. Databáze obsahuje metadata přehrávaných videí (media_id, shortcode, délka, hashtagy, počty liků a komentářů). Data jsou komprimována pomocí zlib/gzip.
+Synchronizace Instagram interních databází a čtení paměti procesu z rootnutého telefonu. Implementuje několik zdrojů metadat:
+
+| Zdroj | Popis |
+|-------|-------|
+| `flash_media.db` | Primární cache přehrávaných Reelů (~72 videí po startu) |
+| `clips.db` | Sekundární DB s uloženými klipy |
+| `user_reel_medias_room_db` | DB se Reely sledovaných uživatelů |
+| HTTP response cache | Komprimované API odpovědi z `/cache/http_responses/` |
+| Paměť procesu (proc mem) | Nativní OkHttp buffery v `/proc/{pid}/mem` – raw JSON s aktuálně načtenými videi |
+
+Data v `flash_media.db` jsou komprimována pomocí zlib/gzip. Paměťový scan cílí na adresní rozsah `0x6e00–0x7500`, kde Instagram alokuje buffery síťových odpovědí.
 
 ### `check_devices.py`
 Samostatný diagnostický skript pro řešení problémů s připojením telefonů přes ADB.

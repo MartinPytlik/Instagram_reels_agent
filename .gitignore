@@ -14,6 +14,10 @@ env/
 # Instagram DB cache (runtime data stažená z telefonu)
 *.db
 flash_media_*.db
+*_reel_medias_*.db
+http_cache_*/
+_proc_mem_scan.sh
+_proc_mem_out.txt
 
 # Výstupní data bota
 reels_data_*.json

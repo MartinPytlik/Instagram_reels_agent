@@ -92,7 +92,7 @@ def open_instagram(device, device_prefix: str = "", serial_number: str = None):
 
 
 def go_to_reels(device, device_prefix: str = ""):
-    """Přejde na sekci Reels (pokud tam ještě nejsme)."""
+    """Přejde na sekci Reels a ověří, že se navigace zdařila."""
     prefix = f"[{device_prefix}] " if device_prefix else ""
 
     if is_on_reels(device):
@@ -100,24 +100,42 @@ def go_to_reels(device, device_prefix: str = ""):
 
     print(f"{prefix}Přecházím na Reels...")
 
-    for selector in [
-        {"description": "Reels"},
-        {"descriptionContains": "Reels"},
-        {"resourceIdMatches": ".*reels.*"},
-        {"text": "Reels"},
-    ]:
-        try:
-            if device(**selector).exists(timeout=1):
-                device(**selector).click()
-                break
-        except Exception:
-            continue
-    else:
-        # Fallback: střed dolní navigační lišty
-        w, h = device.window_size()
-        device.click(w // 2, h - 100)
+    # Selektory cílí výhradně na navigační tab (resource ID), nikoli na nadpisy stránek.
+    # Generické text/description selektory záměrně chybí – zachytily by "Reels" nadpis nahoře.
+    _REELS_TAB_SELECTORS = [
+        {"resourceIdMatches": ".*reels_tab.*"},
+        {"resourceIdMatches": ".*clips_tab.*"},
+        {"resourceId": "com.instagram.android:id/clips_tab"},
+        {"resourceId": "com.instagram.android:id/reels_tab"},
+    ]
 
-    time.sleep(0.2)
+    def _click_reels_tab():
+        w, h = device.window_size()
+        for selector in _REELS_TAB_SELECTORS:
+            try:
+                el = device(**selector)
+                if el.exists(timeout=2):
+                    # Ověř, že element je v dolní navigační liště (spodních 15 % obrazovky)
+                    info = el.info
+                    bounds = info.get("bounds", {})
+                    center_y = (bounds.get("top", 0) + bounds.get("bottom", h)) // 2
+                    if center_y > h * 0.80:
+                        el.click()
+                        return True
+            except Exception:
+                continue
+        # Fallback: střed dolní navigační lišty
+        device.click(w // 2, h - 80)
+        return False
+
+    # Pokus 1 – klikni a čekej až 6s na načtení prvního Reelu (polling)
+    _click_reels_tab()
+    if is_on_reels(device, wait_s=6.0):
+        return
+
+    # Pokus 2 – Reely se ještě nenačetly, zkus znovu
+    _click_reels_tab()
+    is_on_reels(device, wait_s=5.0)
 
 
 def go_back_to_reels(device) -> bool:
@@ -130,37 +148,30 @@ def go_back_to_reels(device) -> bool:
     w, h = device.window_size()
 
     try:
-        # Klikni na ikonu Reels v dolní liště
+        # Klikni přímo na střed dolní navigační lišty (Reels tab je typicky uprostřed)
         device.click(w // 2, h - 80)
-        time.sleep(1.5)
-        if is_on_reels(device):
+        if is_on_reels(device, wait_s=3.0):
             return True
 
-        # Zkus Reels tab podle selektoru
+        # Zkus resource-ID selektory (jen navigační tab, ne nadpisy)
         for selector in [
-            {"description": "Reels"},
-            {"descriptionContains": "Reels"},
+            {"resourceIdMatches": ".*reels_tab.*"},
             {"resourceIdMatches": ".*clips_tab.*"},
-            {"resourceIdMatches": ".*reels.*"},
+            {"resourceId": "com.instagram.android:id/clips_tab"},
         ]:
             try:
                 el = device(**selector)
-                if el.exists(timeout=0.5):
-                    el.click()
-                    time.sleep(1.5)
-                    if is_on_reels(device):
-                        return True
+                if el.exists(timeout=1):
+                    info = el.info
+                    bounds = info.get("bounds", {})
+                    center_y = (bounds.get("top", 0) + bounds.get("bottom", h)) // 2
+                    if center_y > h * 0.80:
+                        el.click()
+                        if is_on_reels(device, wait_s=2.0):
+                            return True
             except Exception:
                 continue
 
-        device.press("back")
-        time.sleep(0.8)
-        if is_on_reels(device):
-            return True
-
-        # Swipe doprava (návrat z homepage)
-        device.swipe(int(w * 0.05), h // 2, int(w * 0.95), h // 2, duration=0.2)
-        time.sleep(1)
         return is_on_reels(device)
 
     except Exception as e:
@@ -169,28 +180,38 @@ def go_back_to_reels(device) -> bool:
     return False
 
 
-def is_on_reels(device) -> bool:
-    """Vrátí True pokud je zařízení aktuálně na sekci Reels."""
-    try:
-        xml_str = device.dump_hierarchy()
+def is_on_reels(device, wait_s: float = 0.0) -> bool:
+    """
+    Vrátí True pokud je zařízení aktuálně na sekci Reels.
 
-        # Negativní indikátory – jsme na homepage nebo jinde
-        if re.search(r'content-desc="[^"]*Story[^"]*"', xml_str):
-            return False
-        for indicator in ("Sponsored", "Suggested for you", "liked by"):
-            if indicator in xml_str:
+    Args:
+        wait_s: Pokud > 0, polling dokud se Reels neobjeví nebo timeout.
+                Vhodné hned po navigaci, kdy se UI ještě načítá.
+    """
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            xml_str = device.dump_hierarchy()
+
+            # Jasné negativní indikátory – homepage nebo Stories
+            if re.search(r'content-desc="[^"]*Story[^"]*"', xml_str):
                 return False
+            for indicator in ("Suggested for you", "liked by"):
+                if indicator in xml_str:
+                    return False
 
-        # Pozitivní indikátory
-        if "Like number is" in xml_str:
-            return True
-        if 'content-desc="Unlike"' in xml_str:
-            return True
-        if "Profile picture of" in xml_str:
-            return True
+            # Pozitivní indikátory (spolehlivé – vyskytují se pouze v Reels)
+            if "Like number is" in xml_str:
+                return True
+            if 'content-desc="Unlike"' in xml_str:
+                return True
 
-    except Exception:
-        pass
+        except Exception:
+            pass
+
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.6)
 
     return False
 
@@ -366,6 +387,12 @@ _UI_FILTER_WORDS: frozenset[str] = frozenset({
     "follow", "following", "sledovat", "message", "more", "like", "comment", "share",
     "instagram", "reels", "home", "search", "explore", "profile", "settings",
     "save", "uložit", "send", "poslat", "back", "zpět", "close", "zavřít",
+    # Akce a UI prvky v CZ/EN lokalizaci Instagramu
+    "repost", "repostovat", "remix", "remixovat", "add", "přidat",
+    "sdílet", "report", "nahlásit", "not interested", "nezajímá",
+    "audio", "zvuk", "effects", "efekty", "stickers", "nálepky",
+    "profil", "profile", "story", "příběh", "reel", "video",
+    "notifications", "oznámení", "activity", "aktivita",
 })
 
 
@@ -459,10 +486,26 @@ def _extract_username(xml_str: str) -> str | None:
 def _enrich_from_db(info: dict, serial_number):
     """Doplní metadata z lokální cache databáze Instagram médií."""
     try:
-        from db_cache import get_media_id_from_db
+        from db_cache import get_media_id_from_db, refresh_db_cache
         from get_media_id import get_reel_url
 
-        db_info = get_media_id_from_db(info.get("username"), serial_number)
+        username = info.get("username")
+        if not username:
+            return  # Bez username nelze spolehlivě spárovat s DB
+
+        time.sleep(1.0)
+        refresh_db_cache(serial_number)
+        db_info = get_media_id_from_db(username, serial_number)
+
+        if not db_info:
+            # Instagram možná ještě nestačil zapsat do DB – krátký polling (max 2 s)
+            for _ in range(4):
+                time.sleep(0.5)
+                refresh_db_cache(serial_number)
+                db_info = get_media_id_from_db(username, serial_number)
+                if db_info:
+                    break
+
         if not db_info:
             return
 
